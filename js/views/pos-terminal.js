@@ -9,6 +9,7 @@ import { formatCurrency } from '../utils/format.js';
 import { escapeHtml, delegate, debounce } from '../utils/dom.js';
 import { showToast } from '../utils/toast.js';
 import { listenForBarcodeInput, startBarcodeScanner } from '../utils/barcode.js';
+import { deductInventoryAndSaveOrder, getDemoStockMap } from '../utils/inventory.js';
 
 const icons = {
   search: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>`,
@@ -121,34 +122,52 @@ async function loadPosProducts(category = '', search = '') {
   if (!grid) return;
 
   const sb = getSupabase();
+  const demoStockMap = getDemoStockMap();
   let products = [];
 
   if (sb) {
     let q = sb.from('products').select('*, inventory(quantity)').eq('is_published', true);
     if (search) q = q.or(`name.ilike.%${search}%,sku.ilike.%${search}%,barcode.ilike.%${search}%`);
     const { data } = await query(q);
-    if (data) products = data;
+    if (data && data.length > 0) products = data;
   }
 
   if (products.length === 0) {
     products = [
-      { id: 'demo-1', name: 'Wireless Earbuds', price: 2499, sku: 'EAR-001', inventory: [{ quantity: 45 }] },
-      { id: 'demo-2', name: 'Cotton T-Shirt', price: 799, sku: 'TSH-002', inventory: [{ quantity: 120 }] },
-      { id: 'demo-3', name: 'Smart Watch Pro', price: 4999, sku: 'WTC-003', inventory: [{ quantity: 15 }] },
-      { id: 'demo-4', name: 'Green Tea 100g', price: 349, sku: 'TEA-004', inventory: [{ quantity: 200 }] },
-      { id: 'demo-5', name: 'Leather Wallet', price: 1299, sku: 'WLT-005', inventory: [{ quantity: 35 }] },
+      { id: 'demo-1', name: 'Wireless Earbuds', price: 2499, sku: 'EAR-001' },
+      { id: 'demo-2', name: 'Cotton T-Shirt', price: 799, sku: 'TSH-002' },
+      { id: 'demo-3', name: 'Smart Watch Pro', price: 4999, sku: 'WTC-003' },
+      { id: 'demo-4', name: 'Green Tea 100g', price: 349, sku: 'TEA-004' },
+      { id: 'demo-5', name: 'Leather Wallet', price: 1299, sku: 'WLT-005' },
     ];
   }
 
-  grid.innerHTML = products.map(p => `
-    <div class="pos-product-tile" data-id="${p.id}" data-name="${escapeHtml(p.name)}" data-price="${p.price}">
-      <div class="pos-product-tile-image">
-        <div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.5rem">🛍️</div>
+  grid.innerHTML = products.map(p => {
+    const stock = p.inventory?.[0]?.quantity !== undefined 
+      ? p.inventory[0].quantity 
+      : (demoStockMap[p.id] !== undefined ? demoStockMap[p.id] : 50);
+
+    const isOut = stock <= 0;
+    const isLow = stock > 0 && stock <= Config.LOW_STOCK_THRESHOLD;
+    const badgeClass = isOut ? 'badge-danger' : (isLow ? 'badge-warning' : 'badge-success');
+
+    return `
+      <div class="pos-product-tile ${isOut ? 'opacity-50' : ''}" 
+        data-id="${p.id}" 
+        data-name="${escapeHtml(p.name)}" 
+        data-price="${p.price}"
+        data-stock="${stock}">
+        <div class="pos-product-tile-image">
+          <div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:1.5rem">🛍️</div>
+        </div>
+        <div class="pos-product-tile-name">${escapeHtml(p.name)}</div>
+        <div class="pos-product-tile-price">${formatCurrency(p.price)}</div>
+        <div class="mt-1">
+          <span class="badge ${badgeClass}" style="font-size:10px">${isOut ? 'Out of Stock' : 'Stock: ' + stock}</span>
+        </div>
       </div>
-      <div class="pos-product-tile-name">${escapeHtml(p.name)}</div>
-      <div class="pos-product-tile-price">${formatCurrency(p.price)}</div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 }
 
 function refreshPosCart() {
@@ -194,10 +213,17 @@ function refreshPosCart() {
 function setupPosEvents(container) {
   // Tile click
   delegate(container, 'click', '.pos-product-tile', (e, tile) => {
+    const stock = parseInt(tile.dataset.stock || '50', 10);
+    if (stock <= 0) {
+      showToast('Item is out of stock', 'warning');
+      return;
+    }
+
     posCart.addItem({
       id: tile.dataset.id,
       name: tile.dataset.name,
       price: parseFloat(tile.dataset.price),
+      max_stock: stock,
     });
     refreshPosCart();
   });
@@ -292,10 +318,27 @@ function handleCashCheckout(container) {
 async function completePosOrder(method) {
   if (posCart.items.length === 0) return;
 
-  showToast(`POS Sale Completed via ${method.toUpperCase()}!`, 'success');
-  printReceipt(posCart.items, posCart.getTotal());
+  const items = [...posCart.items];
+  const totals = {
+    subtotal: posCart.getSubtotal(),
+    tax: posCart.getTax(),
+    discount: posCart.getDiscountAmount(),
+    total: posCart.getTotal(),
+  };
+
+  showToast(`Processing ${method.toUpperCase()} POS Sale...`, 'info');
+
+  await deductInventoryAndSaveOrder(items, method, totals);
+
+  showToast(`POS Sale Completed! Stock updated.`, 'success');
+  printReceipt(items, totals.total);
   posCart.clear();
   refreshPosCart();
+  
+  // Force reload products to get updated inventory
+  // Small delay to ensure database consistency
+  await new Promise(resolve => setTimeout(resolve, 100));
+  await loadPosProducts();
 }
 
 function printReceipt(items, total) {

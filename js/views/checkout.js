@@ -7,6 +7,7 @@ import auth from '../auth.js';
 import { formatCurrency } from '../utils/format.js';
 import { showToast } from '../utils/toast.js';
 import { invokeFunction, getSupabase, query } from '../supabase.js';
+import { deductInventoryAndSaveOrder } from '../utils/inventory.js';
 import Config from '../config.js';
 
 export async function renderCheckout(params, queryParams, container) {
@@ -140,11 +141,20 @@ function setupCheckoutEvents(container) {
     if (edgeErr || !edgeData?.order_id) {
       // Fallback demo flow if Edge Functions aren't deployed yet
       console.warn('Edge function unavailable, initiating client demo payment mode.');
-      initiateRazorpayCheckout({
-        id: `order_demo_${Date.now()}`,
-        amount: cart.getTotal() * 100, // Razorpay works in paise
-        currency: Config.CURRENCY,
-      }, shippingAddress);
+      
+      // For demo mode, simulate successful payment directly
+      const items = [...cart.items];
+      const totals = {
+        subtotal: cart.getSubtotal(),
+        tax: cart.getTax(),
+        discount: cart.getDiscountAmount(),
+        total: cart.getTotal(),
+      };
+      
+      await deductInventoryAndSaveOrder(items, 'razorpay', totals);
+      showToast('Demo order completed successfully!', 'success');
+      cart.clear();
+      window.location.hash = '#/account';
     } else {
       initiateRazorpayCheckout(edgeData, shippingAddress);
     }
@@ -184,6 +194,17 @@ function initiateRazorpayCheckout(orderData, shippingAddress) {
         razorpay_order_id: response.razorpay_order_id,
         razorpay_signature: response.razorpay_signature,
       });
+
+      // Deduct inventory for the completed sale
+      const items = [...cart.items];
+      const totals = {
+        subtotal: cart.getSubtotal(),
+        tax: cart.getTax(),
+        discount: cart.getDiscountAmount(),
+        total: cart.getTotal(),
+      };
+      
+      await deductInventoryAndSaveOrder(items, 'razorpay', totals);
 
       cart.clear();
       window.location.hash = '#/account';
