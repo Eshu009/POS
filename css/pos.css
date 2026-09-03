@@ -19,7 +19,7 @@
 
 .pos-sidebar {
   width: var(--pos-sidebar-width);
-  background: var(--color-bg-secondary);
+  background: var(--color-bg-card);
   border-left: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
